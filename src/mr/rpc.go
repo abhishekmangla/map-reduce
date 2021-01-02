@@ -25,10 +25,16 @@ type ExampleArgs struct {
 }
 
 type ExampleReply struct {
-	Task          string
-	TaskNo        int
-	NumPartitions int
-	Done          bool
+	Task             string
+	TaskNo           int
+	TotalNumMapTasks int
+	NumPartitions    int
+	MapDirectory     string
+	ReduceDirectory  string
+}
+
+type MapStatusReply struct {
+	Done bool
 }
 
 // Add your RPC definitions here.

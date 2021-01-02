@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/rpc"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"time"
@@ -49,12 +48,6 @@ func Worker(mapf func(string, string) []KeyValue,
 	var reply ExampleReply
 	var finish = false
 	var finishedTask = ""
-	// Create Temp Dir
-	cwd, err := os.Getwd()
-	odir, err := ioutil.TempDir(cwd, "temp")
-	if err != nil {
-		log.Fatalf("%v", err)
-	}
 
 	for reply = CallExample(finish, finishedTask); reply.Task != ""; reply = CallExample(finish, finishedTask) {
 		// Process input file
@@ -73,50 +66,54 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 		for partition, kvList := range partitions {
 			oname := "mr-out-" + fmt.Sprint(reply.TaskNo) + "-" + fmt.Sprint(partition)
-			ofile, _ := os.Create(odir + "/" + oname)
+			ofile, err := os.Create(reply.MapDirectory + "/" + oname)
+			if err != nil {
+				log.Fatalln(err)
+			}
 			var totalDataWritten int = 0
 			for _, kv := range kvList {
 				jsonKv, _ := json.Marshal(kv)
 				n, _ := ofile.WriteString(string(jsonKv) + "\n")
 				totalDataWritten += n
 			}
-			fmt.Printf("Wrote %d data to %s\n", totalDataWritten, ofile.Name())
+			// log.Printf("Wrote %d data to %s\n", totalDataWritten, ofile.Name())
 			ofile.Close()
 		}
 		finish = true
 		finishedTask = filename
 	}
 
-	var newReply = ExampleReply{}
-	fmt.Println("Check if all maps are done...")
+	var newReply = MapStatusReply{}
+	log.Println("Check if all maps are done...")
 	for !newReply.Done {
 		time.Sleep(time.Second * 2)
 		newReply = CallCheckMapDone()
-		fmt.Printf("%+v\n", newReply)
+		log.Printf("%+v\n", newReply)
 	}
-	fmt.Println("Done waiting for all map ops to be done!")
+	log.Println("Done waiting for all map ops to be done!")
 
 	var reduceReply = ExampleReply{}
 	finish = false
 	finishedTask = ""
-	var reduceFiles []string
-	fmt.Println("Request reduce tasks...")
+	log.Println("Request reduce tasks...")
 	for reduceReply = RequestReduceTask(finish, finishedTask); reduceReply.TaskNo != -1; reduceReply = RequestReduceTask(finish, finishedTask) {
 		// finish = false
 		// finishedTask = ""
 		taskName := strconv.Itoa(reduceReply.TaskNo)
-		ret := GetAllFiles(odir, taskName, reduceFiles[:])
-
-		ReductionStep(ret, reducef, odir, "mr-out-"+taskName)
+		ret := GetAllFiles(reply.MapDirectory, reply.TotalNumMapTasks, taskName)
+		if len(ret) < reply.TotalNumMapTasks {
+			log.Fatalln("Did not retrieve all Map files...")
+		}
+		fmt.Println(ret)
+		ReductionStep(ret, reducef, reply.ReduceDirectory, "mr-out-"+taskName)
 		finish = true
 		finishedTask = taskName
+		log.Println("Finished with " + finishedTask)
 	}
-	// TODO: clean up temp dir / files
-	// defer os.RemoveAll(odir)
 }
 
 // ReductionStep
-func ReductionStep(ret []string, reducef func(string, []string) string, odir string, oname string) {
+func ReductionStep(ret []string, reducef func(string, []string) string, reduceDir string, oname string) {
 	intermediate := []KeyValue{}
 
 	for _, file := range ret {
@@ -138,11 +135,11 @@ func ReductionStep(ret []string, reducef func(string, []string) string, odir str
 			log.Fatal(err)
 		}
 		sort.Sort(ByKey(intermediate))
-		err = os.Mkdir(odir+"/reduceOutput", os.ModeDir)
-		// if err != nil {
-		// 	log.Fatalln(err)
-		// }
-		ofile, _ := os.Create(odir + "/reduceOutput/" + oname)
+		ofile, err := os.Create(reduceDir + "/" + oname)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
 		// call Reduce on each distinct key in intermediate[],
 		// and print the result to mr-out-0.
 		//
@@ -159,8 +156,10 @@ func ReductionStep(ret []string, reducef func(string, []string) string, odir str
 			output := reducef(intermediate[i].Key, values)
 
 			// this is the correct format for each line of Reduce output.
-			fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
-
+			_, err = fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+			if err != nil {
+				log.Fatalln(err)
+			}
 			i = j
 		}
 
@@ -169,21 +168,13 @@ func ReductionStep(ret []string, reducef func(string, []string) string, odir str
 }
 
 // GetAllFiles: gets all files for a particular reduction bucket based on last number in filename
-func GetAllFiles(root string, reduceNo string, files []string) []string {
-	// fmt.Println(root)
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		// fmt.Println(path)
-		lastChar := string(path[len(path)-1:])
-		// fmt.Println(lastChar, reduceNo, lastChar == reduceNo)
-		if lastChar == reduceNo && !info.IsDir() {
-			// fmt.Println("Here", path)
-			files = append(files, path)
-		}
-		return nil
-	})
-	if err != nil {
-		panic(err)
+func GetAllFiles(root string, numMapTasks int, reduceNo string) []string {
+	var files []string
+	for i := 0; i < numMapTasks; i++ {
+		filename := root + "/mr-out-" + strconv.Itoa(i) + "-" + reduceNo
+		files = append(files, filename)
 	}
+	fmt.Println(files)
 	return files
 }
 
@@ -198,24 +189,20 @@ func RequestReduceTask(finish bool, finishedTaskName string) ExampleReply {
 
 	// send the RPC request, wait for the reply.
 	call("Master.RequestTask", &args, &reply)
-	fmt.Printf("Reduce Task assigned: %d\n", reply.TaskNo)
-	// fmt.Printf("%+v\n", reply)
+	log.Printf("Reduce Task assigned: %d\n", reply.TaskNo)
+	// log.Printf("%+v\n", reply)
 
 	return reply
 }
 
-//
 // example function to show how to make an RPC call to the master.
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func CallCheckMapDone() ExampleReply {
+func CallCheckMapDone() MapStatusReply {
 	args := ExampleArgs{}
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
+	reply := MapStatusReply{}
 	call("Master.CheckMapDone", &args, &reply)
-	// fmt.Printf("%+v\n", reply)
 	return reply
 }
 
@@ -234,13 +221,13 @@ func CallExample(finish bool, finishedTaskName string) ExampleReply {
 
 	args.Finish = finish
 	args.TaskName = finishedTaskName
-	// fmt.Printf("Hi I am %d\n", args.Pid)
+	// log.Printf("Hi I am %d\n", args.Pid)
 	// declare a reply structure.
 	reply := ExampleReply{}
 
 	// send the RPC request, wait for the reply.
 	call("Master.RequestTask", &args, &reply)
-	fmt.Printf("Task assigned: %s\n", reply.Task)
+	log.Printf("Task assigned: %s\n", reply.Task)
 	return reply
 }
 
@@ -263,6 +250,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	log.Println(err)
 	return false
 }
