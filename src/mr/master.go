@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -39,24 +40,25 @@ type Status struct {
 //
 func (m *Master) RequestTask(args *ExampleArgs, reply *ExampleReply) error {
 	// Check args for finish task information
+	m.mapMutex.Lock()
+	defer m.mapMutex.Unlock()
 	if args.Finish {
-		m.mapMutex.Lock()
+		// m.mapMutex.Lock()
 		log.Printf("Process Id: %d finished task %s\n", args.Pid, args.TaskName)
 		oldStruct := m.taskMap[args.TaskName]
 		m.taskMap[args.TaskName] = Status{2, oldStruct.timeAssigned, oldStruct.pid}
-		m.mapMutex.Unlock()
+		// m.mapMutex.Unlock()
 	}
 	if args.ReduceFinish {
-		m.reduceMutex.Lock()
+		// m.reduceMutex.Lock()
 		log.Printf("Process Id: %d finished reduce task %s\n", args.Pid, args.TaskName)
 		taskNo, _ := strconv.Atoi(args.TaskName)
 		oldStruct := m.partitionStatus[taskNo]
 		m.partitionStatus[taskNo] = Status{2, oldStruct.timeAssigned, oldStruct.pid}
 		// m.partitionStatus[taskNo] = 2
-		m.reduceMutex.Unlock()
+		// m.reduceMutex.Unlock()
 	}
-	m.mapMutex.Lock()
-	defer m.mapMutex.Unlock()
+
 	if !m.doneMap {
 		// Try sending a response back with a new task to the worker
 		log.Printf("Process Id: %d requesting a map task...\n", args.Pid)
@@ -83,8 +85,8 @@ func (m *Master) RequestTask(args *ExampleArgs, reply *ExampleReply) error {
 		m.doneMap = true
 	}
 
-	m.reduceMutex.Lock()
-	defer m.reduceMutex.Unlock()
+	// m.reduceMutex.Lock()
+	// defer m.reduceMutex.Unlock()
 	// Try to assign reduce tasks
 	for idx := 0; idx < m.numPartitions; idx++ {
 		status := m.partitionStatus[idx]
@@ -96,6 +98,7 @@ func (m *Master) RequestTask(args *ExampleArgs, reply *ExampleReply) error {
 			// log.Printf("%v\n", m.partitionStatus)
 			reply.TaskNo = idx
 			reply.MapDirectory = m.mapDirectory
+			fmt.Println("num tasks", len(m.taskMap))
 			reply.TotalNumMapTasks = len(m.taskMap)
 			reply.ReduceDirectory = m.reduceDirectory
 			return nil
@@ -112,8 +115,6 @@ func (m *Master) RequestTask(args *ExampleArgs, reply *ExampleReply) error {
 	log.Println("All reduce tasks are completed...")
 
 	reply.TaskNo = -1
-
-	// reply.Task should be nil when all tasks in the map are -2.
 	return nil
 }
 
@@ -123,6 +124,7 @@ func (m *Master) CheckMapDone(args *ExampleArgs, reply *MapStatusReply) error {
 	for _, elem := range m.taskMap {
 		if elem.status != 2 {
 			reply.Done = false
+			log.Println(m.taskMap)
 			break
 		}
 	}
@@ -153,10 +155,10 @@ func (m *Master) Done() bool {
 	// Check map status and partition status init_epoch_time, if current time >
 	// init_epoch_time + 10 seconds, open that task up for re-tasking.
 	m.mapMutex.Lock()
-	m.reduceMutex.Lock()
+	// m.reduceMutex.Lock()
 
 	defer m.mapMutex.Unlock()
-	defer m.reduceMutex.Unlock()
+	// defer m.reduceMutex.Unlock()
 	for key, element := range m.taskMap {
 		now := time.Now()
 		if element.status == 1 && (now.Unix()-element.timeAssigned) > 10 {

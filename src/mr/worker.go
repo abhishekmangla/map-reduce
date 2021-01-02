@@ -45,6 +45,7 @@ func ihash(key string) int {
 //
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	var reply ExampleReply
 	var finish = false
 	var finishedTask = ""
@@ -52,8 +53,14 @@ func Worker(mapf func(string, string) []KeyValue,
 	for reply = CallExample(finish, finishedTask); reply.Task != ""; reply = CallExample(finish, finishedTask) {
 		// Process input file
 		filename := reply.Task
-		file, _ := os.Open(filename)
-		content, _ := ioutil.ReadAll(file)
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		content, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatalln(err)
+		}
 		file.Close()
 
 		// Apply map function
@@ -72,8 +79,14 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			var totalDataWritten int = 0
 			for _, kv := range kvList {
-				jsonKv, _ := json.Marshal(kv)
-				n, _ := ofile.WriteString(string(jsonKv) + "\n")
+				jsonKv, err := json.Marshal(kv)
+				if err != nil {
+					log.Fatalln(err)
+				}
+				n, err := ofile.WriteString(string(jsonKv) + "\n")
+				if err != nil {
+					log.Fatalln(err)
+				}
 				totalDataWritten += n
 			}
 			// log.Printf("Wrote %d data to %s\n", totalDataWritten, ofile.Name())
@@ -100,12 +113,13 @@ func Worker(mapf func(string, string) []KeyValue,
 		// finish = false
 		// finishedTask = ""
 		taskName := strconv.Itoa(reduceReply.TaskNo)
-		ret := GetAllFiles(reply.MapDirectory, reply.TotalNumMapTasks, taskName)
-		if len(ret) < reply.TotalNumMapTasks {
+		// log.Printf("%+v\n", reduceReply)
+		ret := GetAllFiles(reduceReply.MapDirectory, reduceReply.TotalNumMapTasks, taskName)
+		if len(ret) < reduceReply.TotalNumMapTasks {
 			log.Fatalln("Did not retrieve all Map files...")
 		}
-		fmt.Println(ret)
-		ReductionStep(ret, reducef, reply.ReduceDirectory, "mr-out-"+taskName)
+		// log.Println(ret)
+		ReductionStep(ret, reducef, reduceReply.ReduceDirectory, "mr-out-"+taskName)
 		finish = true
 		finishedTask = taskName
 		log.Println("Finished with " + finishedTask)
@@ -174,7 +188,7 @@ func GetAllFiles(root string, numMapTasks int, reduceNo string) []string {
 		filename := root + "/mr-out-" + strconv.Itoa(i) + "-" + reduceNo
 		files = append(files, filename)
 	}
-	fmt.Println(files)
+	// log.Println(files)
 	return files
 }
 
