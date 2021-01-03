@@ -1,8 +1,8 @@
 package mr
 
 import (
-	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -14,15 +14,14 @@ import (
 
 type Master struct {
 	// Your definitions here.
-	taskMap         map[string]Status // map a filename to the pid processing it, 0=unassigned, 1=inprogress, 2=done
-	numPartitions   int               // number of partitions of map K-V pairs for later reduction
-	taskTaskNoMap   map[string]int    // map task to task number
-	partitionStatus map[int]Status    // status of operation on partition 0=idle, 1=inprogress, 2=done
-	doneMap         bool              // Done with map work
-	mapDirectory    string
-	reduceDirectory string
-	mapMutex        sync.Mutex
-	reduceMutex     sync.Mutex
+	mapTaskStatus    map[string]Status // map a filename to the pid processing it, 0=unassigned, 1=inprogress, 2=done
+	numPartitions    int               // number of partitions of map K-V pairs for later reduction
+	taskTaskNoMap    map[string]int    // map task to task number
+	reduceTaskStatus map[string]Status // status of operation on partition 0=idle, 1=inprogress, 2=done
+	mapDirectory     string
+	reduceDirectory  string
+	mutex            sync.Mutex
+	phase            string
 }
 
 type Status struct {
@@ -33,100 +32,90 @@ type Status struct {
 
 // Your code here -- RPC handlers for the worker to call.
 
+func shouldSleep(statusMap map[string]Status) int {
+	var minSleepTime float64 = 10
+	for _, element := range statusMap {
+		if element.status == 0 {
+			return 0
+		} else if element.status == 1 {
+			minSleepTime = math.Min(minSleepTime, float64(10-(time.Now().Unix()-element.timeAssigned)))
+		}
+	}
+	return int(minSleepTime)
+}
+
 //
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func (m *Master) RequestTask(args *ExampleArgs, reply *ExampleReply) error {
+func (m *Master) RequestTask(args *GetTaskArgs, reply *TaskResponse) error {
 	// Check args for finish task information
-	m.mapMutex.Lock()
-	defer m.mapMutex.Unlock()
-	if args.Finish {
-		// m.mapMutex.Lock()
-		log.Printf("Process Id: %d finished task %s\n", args.Pid, args.TaskName)
-		oldStruct := m.taskMap[args.TaskName]
-		m.taskMap[args.TaskName] = Status{2, oldStruct.timeAssigned, oldStruct.pid}
-		// m.mapMutex.Unlock()
-	}
-	if args.ReduceFinish {
-		// m.reduceMutex.Lock()
-		log.Printf("Process Id: %d finished reduce task %s\n", args.Pid, args.TaskName)
-		taskNo, _ := strconv.Atoi(args.TaskName)
-		oldStruct := m.partitionStatus[taskNo]
-		m.partitionStatus[taskNo] = Status{2, oldStruct.timeAssigned, oldStruct.pid}
-		// m.partitionStatus[taskNo] = 2
-		// m.reduceMutex.Unlock()
-	}
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	reply.Phase = m.phase
 
-	if !m.doneMap {
-		// Try sending a response back with a new task to the worker
-		log.Printf("Process Id: %d requesting a map task...\n", args.Pid)
-
-		for key, element := range m.taskMap {
+	if m.phase == "map" {
+		reply.Sleep = shouldSleep(m.mapTaskStatus)
+		reply.NumPartitions = m.numPartitions
+		reply.MapDirectory = m.mapDirectory
+		for key, element := range m.mapTaskStatus {
 			if element.status == 0 {
-				now := time.Now()
 				log.Printf("Map Task %s is unassigned. Assigning to %d\n", key, args.Pid)
-				m.taskMap[key] = Status{1, now.Unix(), args.Pid}
+				m.mapTaskStatus[key] = Status{1, time.Now().Unix(), args.Pid}
 				reply.Task = key
 				reply.TaskNo = m.taskTaskNoMap[key]
-				reply.NumPartitions = m.numPartitions
+				return nil
+			}
+		}
+	} else if m.phase == "reduce" {
+		reply.Sleep = shouldSleep(m.reduceTaskStatus)
+		reply.ReduceDirectory = m.reduceDirectory
+		for key, element := range m.reduceTaskStatus {
+			if element.status == 0 {
+				log.Printf("Reduce Task %s is unassigned. Assigning to %d\n", key, args.Pid)
+				m.reduceTaskStatus[key] = Status{1, time.Now().Unix(), args.Pid}
+				// var err error
+				reply.Task = key
+				// if err != nil {
+				// 	log.Fatalln(err)
+				// }
 				reply.MapDirectory = m.mapDirectory
+				reply.TotalNumMapTasks = len(m.mapTaskStatus)
+				reply.ReduceDirectory = m.reduceDirectory
 				return nil
 			}
-		}
 
-		// Check if all map processes are finished
-		for _, element := range m.taskMap {
-			if element.status != 2 {
-				return nil
-			}
-		}
-		m.doneMap = true
-	}
-
-	// m.reduceMutex.Lock()
-	// defer m.reduceMutex.Unlock()
-	// Try to assign reduce tasks
-	for idx := 0; idx < m.numPartitions; idx++ {
-		status := m.partitionStatus[idx]
-		if status.status == 0 {
-			log.Printf("Reduce Task %d is unassigned. Assigning to %d\n", idx, args.Pid)
-			// oldStruct := m.partitionStatus[idx]
-			m.partitionStatus[idx] = Status{1, time.Now().Unix(), args.Pid}
-			// m.partitionStatus[idx] = 1
-			// log.Printf("%v\n", m.partitionStatus)
-			reply.TaskNo = idx
-			reply.MapDirectory = m.mapDirectory
-			fmt.Println("num tasks", len(m.taskMap))
-			reply.TotalNumMapTasks = len(m.taskMap)
-			reply.ReduceDirectory = m.reduceDirectory
-			return nil
-		}
-
-	}
-	log.Println("No reduce tasks are unassigned...")
-	// Check if all reduce processes are finished
-	for _, element := range m.partitionStatus {
-		if element.status != 2 {
-			return nil
 		}
 	}
-	log.Println("All reduce tasks are completed...")
-
-	reply.TaskNo = -1
 	return nil
 }
 
-// CheckMapDone
-func (m *Master) CheckMapDone(args *ExampleArgs, reply *MapStatusReply) error {
-	reply.Done = true
-	for _, elem := range m.taskMap {
-		if elem.status != 2 {
-			reply.Done = false
-			log.Println(m.taskMap)
-			break
+//
+// an example RPC handler.
+//
+// the RPC argument and reply types are defined in rpc.go.
+//
+func (m *Master) NotifyTaskComplete(args *NotifyTaskCompleteArgs, reply *NotifyTaskCompleteResponse) error {
+	// Check args for finish task information
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	reply.Ack = false
+
+	if args.Phase == "map" {
+		oldStruct := m.mapTaskStatus[args.Task]
+		m.mapTaskStatus[args.Task] = Status{2, oldStruct.timeAssigned, oldStruct.pid}
+		for _, el := range args.Partitions {
+			m.reduceTaskStatus[strconv.Itoa(el)] = Status{0, 0, 0}
 		}
+		log.Printf("Map Task %s finished by %d\n", args.Task, args.Pid)
+		reply.Ack = true
+	} else if args.Phase == "reduce" {
+		task := args.Task
+		oldStruct := m.reduceTaskStatus[task]
+		m.reduceTaskStatus[task] = Status{2, oldStruct.timeAssigned, oldStruct.pid}
+		log.Printf("Reduce Task %s finished by %d\n", task, args.Pid)
+		reply.Ack = true
 	}
 	return nil
 }
@@ -154,28 +143,31 @@ func (m *Master) server() {
 func (m *Master) Done() bool {
 	// Check map status and partition status init_epoch_time, if current time >
 	// init_epoch_time + 10 seconds, open that task up for re-tasking.
-	m.mapMutex.Lock()
-	// m.reduceMutex.Lock()
-
-	defer m.mapMutex.Unlock()
-	// defer m.reduceMutex.Unlock()
-	for key, element := range m.taskMap {
-		now := time.Now()
-		if element.status == 1 && (now.Unix()-element.timeAssigned) > 10 {
-			m.taskMap[key] = Status{0, 0, 0}
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	for key, element := range m.mapTaskStatus {
+		if element.status == 1 && (time.Now().Unix()-element.timeAssigned) > 10 {
+			m.mapTaskStatus[key] = Status{0, 0, 0}
 		}
 	}
-	for key, element := range m.partitionStatus {
-		now := time.Now()
-		if element.status == 1 && (now.Unix()-element.timeAssigned) > 10 {
-			m.partitionStatus[key] = Status{0, 0, 0}
+	for key, element := range m.reduceTaskStatus {
+		if element.status == 1 && (time.Now().Unix()-element.timeAssigned) > 10 {
+			m.reduceTaskStatus[key] = Status{0, 0, 0}
 		}
 	}
-	for _, element := range m.partitionStatus {
+	for _, element := range m.mapTaskStatus {
 		if element.status != 2 {
 			return false
 		}
 	}
+	m.phase = "reduce"
+	log.Printf("%+v", m.reduceTaskStatus)
+	for _, element := range m.reduceTaskStatus {
+		if element.status != 2 {
+			return false
+		}
+	}
+	// os.RemoveAll(m.mapDirectory)
 	return true
 }
 
@@ -186,27 +178,27 @@ func (m *Master) Done() bool {
 //
 func MakeMaster(files []string, nReduce int) *Master {
 	// log.Printf("Num tasks: %d\n", len(files))
-	taskMap := make(map[string]Status)
+	mapTaskStatus := make(map[string]Status)
 	taskTaskNoMap := make(map[string]int)
-	partitionStatus := make(map[int]Status)
+	reduceTaskStatus := make(map[string]Status)
 	cwd, _ := os.Getwd()
 	mapDirectory := cwd + "/mapOutput"
-	reduceDirectory := cwd + "/reduceOutput"
+	reduceDirectory := cwd
 	_ = os.Mkdir(mapDirectory, 0777)
 	_ = os.Mkdir(reduceDirectory, 0777)
 	for i := 0; i < len(files); i++ {
-		taskMap[files[i]] = Status{0, 0, 0}
+		mapTaskStatus[files[i]] = Status{0, 0, 0}
 		taskTaskNoMap[files[i]] = i
 	}
-	for i := 0; i < nReduce; i++ {
-		partitionStatus[i] = Status{0, 0, 0}
-	}
+	// for i := 0; i < nReduce; i++ {
+	// 	reduceTaskStatus[strconv.Itoa(i)] = Status{0, 0, 0}
+	// }
 	m := Master{}
-	m.taskMap = taskMap
+	m.mapTaskStatus = mapTaskStatus
 	m.numPartitions = nReduce
 	m.taskTaskNoMap = taskTaskNoMap
-	m.partitionStatus = partitionStatus
-	m.doneMap = false
+	m.reduceTaskStatus = reduceTaskStatus
+	m.phase = "map"
 	m.mapDirectory = mapDirectory
 	m.reduceDirectory = reduceDirectory
 	m.server()

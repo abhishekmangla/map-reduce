@@ -16,25 +16,37 @@ import (
 // and reply for an RPC.
 //
 
-type ExampleArgs struct {
+type GetTaskArgs struct {
 	Pid          int
 	Finish       bool
 	TaskName     string
 	TaskNo       int
 	ReduceFinish bool
+	ReducePhase  bool
 }
 
-type ExampleReply struct {
+type TaskResponse struct {
 	Task             string
 	TaskNo           int
 	TotalNumMapTasks int
 	NumPartitions    int
 	MapDirectory     string
 	ReduceDirectory  string
+	Done             bool
+	Sleep            int
+	Phase            string
 }
 
-type MapStatusReply struct {
-	Done bool
+type NotifyTaskCompleteArgs struct {
+	Pid        int
+	Phase      string
+	Task       string
+	TaskNo     int
+	Partitions []int
+}
+
+type NotifyTaskCompleteResponse struct {
+	Ack bool
 }
 
 // Add your RPC definitions here.
